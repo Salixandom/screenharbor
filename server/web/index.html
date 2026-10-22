@@ -3,16 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AniDesk</title>
+  <title>ScreenHarbor</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="vendor/xterm.css">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
 </head>
 <body>
   <!-- Connect screen -->
   <main id="home" class="home">
     <div class="card">
-      <div class="brand"><img src="favicon.svg" alt=""> AniDesk</div>
-      <p class="muted">Open-source remote desktop. Enter the ID, or the share code / link, shown on the computer you want to reach.</p>
+      <div class="brand"><img src="favicon.svg" alt=""> ScreenHarbor</div>
+      <p class="muted">Open-source remote desktop. Enter the ID, share code / link, or stable ScreenHarbor address shown on the computer you want to reach.</p>
       <form id="connect-form" autocomplete="off">
         <label>Remote ID or share code <input id="remote-id" placeholder="123 456 789  or  gentle-river-moon-fox" autocapitalize="off" spellcheck="false" required></label>
         <label>Password <input id="remote-pw" type="password" required></label>
@@ -68,12 +69,15 @@
       <button id="btn-files">Files</button>
       <button id="btn-clip">Clipboard</button>
       <button id="btn-chat">Chat <span id="chat-badge" class="badge hidden">•</span></button>
+      <button id="btn-peers">People <span id="peer-count" class="badge">1</span></button>
+      <button id="btn-terminal">Terminal</button>
       <button id="btn-full">Fullscreen</button>
       <button id="btn-disconnect" class="danger">Disconnect</button>
     </header>
     <div class="stage" id="stage">
       <canvas id="screen" tabindex="0"></canvas>
       <div id="rcursor" class="rcursor hidden"></div>
+      <div id="peer-cursors" aria-hidden="true"></div>
       <div id="overlay" class="overlay hidden"></div>
       <textarea id="kbd" class="kbd" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Remote keyboard"></textarea>
     </div>
@@ -89,6 +93,12 @@
       <div class="dropzone" id="dropzone">Drop files here to upload to this folder, or
         <label class="link">choose files<input type="file" id="fs-upload" multiple hidden></label></div>
       <ul id="transfers" class="transfers"></ul>
+    </aside>
+
+    <aside id="panel-peers" class="panel hidden">
+      <h3>People <button class="x" data-close="panel-peers">×</button></h3>
+      <ul id="peer-list" class="peer-list"></ul>
+      <p class="muted">Colored pointers show where each viewer is pointing.</p>
     </aside>
 
     <aside id="panel-clip" class="panel hidden">
@@ -111,9 +121,16 @@
       <form id="chat-form" class="row"><input id="chat-input" placeholder="Message"><button>Send</button></form>
     </aside>
 
+    <aside id="panel-terminal" class="panel terminal-panel hidden">
+      <h3>Remote terminal <button class="x" data-close="panel-terminal">×</button></h3>
+      <div id="terminal-view"></div>
+    </aside>
+
     <div id="toast" class="toast hidden"></div>
   </section>
 
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

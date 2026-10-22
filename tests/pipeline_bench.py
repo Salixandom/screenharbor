@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "host"))
-from anidesk_host import capture  # noqa: E402
+from screenharbor_host import capture  # noqa: E402
 
 SECONDS = float(sys.argv[1]) if len(sys.argv) > 1 else 4.0
 FPS = 30
@@ -109,7 +109,7 @@ enc = capture.h264_encoder()
 if enc:
     run(f"v0.2  H.264 {enc[0]}", "h264", gpu_signal=True)
     capture._probed = False
-    os.environ["ANIDESK_ENCODER"] = "libx264"
+    os.environ["SCREENHARBOR_ENCODER"] = "libx264"
     if capture.h264_encoder():
         run("v0.2  H.264 libx264 (software)", "h264", gpu_signal=True)
 

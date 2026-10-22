@@ -1,4 +1,4 @@
-"""Built-in relay for "share via link" mode: this host is its own AniDesk server.
+"""Built-in relay for "share via link" mode: this host is its own ScreenHarbor server.
 
 Speaks exactly the same protocol as server/index.js (register / connect / attach,
 then blind forwarding) and serves the web viewer, but only for this one host.
@@ -22,11 +22,11 @@ from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
-log = logging.getLogger("anidesk")
+log = logging.getLogger("screenharbor")
 
 PAIR_TIMEOUT = 20
 SECURITY_HEADERS = [
-    ("Content-Security-Policy", "default-src 'self'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; "
+    ("Content-Security-Policy", "default-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://ntfy.sh ws: wss:; "
                                 "style-src 'self'; frame-ancestors 'none'"),
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),

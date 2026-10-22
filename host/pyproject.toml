@@ -1,7 +1,7 @@
 [project]
-name = "anidesk-host"
+name = "screenharbor-host"
 version = "0.2.0"
-description = "AniDesk host agent: share this computer's screen, keyboard, mouse, files and clipboard"
+description = "ScreenHarbor host agent: share this computer's screen, keyboard, mouse, files and clipboard"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,20 +16,25 @@ dependencies = [
     "av>=12",                                  # H.264 encoding (hardware when available)
     "simplejpeg>=1.7",                         # libjpeg-turbo straight from BGRA
     "dxcam>=0.0.5; sys_platform == 'win32'",   # DXGI desktop duplication capture
+    "pywinpty>=2.0; sys_platform == 'win32'",  # ConPTY terminals (POSIX uses the stdlib pty)
 ]
 
 [project.scripts]
-anidesk-host = "anidesk_host.__main__:main"
+screenharbor-host = "screenharbor_host.__main__:main"
+screenharbor = "screenharbor_host.client:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "psutil>=7.2.2",
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["anidesk_host"]
+packages = ["screenharbor_host"]
 
 [tool.pytest.ini_options]
 testpaths = ["../tests"]

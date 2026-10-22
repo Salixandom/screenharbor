@@ -8,7 +8,7 @@ Handshake (run through the relay, which only forwards bytes):
 
     shared = ECDH(host_priv, viewer_pub)
     pwk    = PBKDF2-SHA256(password, salt, 150000 iterations, 32 bytes)
-    okm    = HKDF-SHA256(ikm=shared, salt=pwk, info="anidesk/v1"|host_pub|viewer_pub, 64 bytes)
+    okm    = HKDF-SHA256(ikm=shared, salt=pwk, info="screenharbor/v1"|host_pub|viewer_pub, 64 bytes)
     k_h2v  = okm[0:32]   k_v2h = okm[32:64]
 
 Because the password is mixed into the key schedule it never travels over
@@ -30,7 +30,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 PBKDF2_ITERATIONS = 150_000
-INFO = b"anidesk/v1"
+INFO = b"screenharbor/v1"
 
 
 def password_key(password: str, salt: bytes) -> bytes:

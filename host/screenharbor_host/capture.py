@@ -38,7 +38,7 @@ try:
 except ImportError:  # optional speed-up
     simplejpeg = None
 
-log = logging.getLogger("anidesk")
+log = logging.getLogger("screenharbor")
 
 TILE = 64
 REFINE_QUALITY = 90
@@ -109,7 +109,7 @@ class Grabber:
         self._dx = None
         self._dx_mon: int | None = None  # mss monitor index served by DXGI
         self._dx_last: np.ndarray | None = None
-        if sys.platform == "win32" and os.environ.get("ANIDESK_CAPTURE", "auto") != "mss":
+        if sys.platform == "win32" and os.environ.get("SCREENHARBOR_CAPTURE", "auto") != "mss":
             self._open_dxgi()
 
     def _open_dxgi(self) -> None:
@@ -171,7 +171,7 @@ class Grabber:
 # ------------------------------------------------------------------- JPEG
 class JpegTiles:
     def __init__(self) -> None:
-        self._pool = ThreadPoolExecutor(4, thread_name_prefix="anidesk-jpeg")
+        self._pool = ThreadPoolExecutor(4, thread_name_prefix="screenharbor-jpeg")
         self.lowq: np.ndarray | None = None
 
     @staticmethod
@@ -262,14 +262,14 @@ def h264_encoder() -> tuple | None:
     if _probed is not False:
         return _probed
     _probed = None
-    if os.environ.get("ANIDESK_CODEC") == "jpeg":
+    if os.environ.get("SCREENHARBOR_CODEC") == "jpeg":
         return None
     try:
         import av
     except ImportError:
         log.info("PyAV not installed: H.264 disabled (pip install av)")
         return None
-    forced = os.environ.get("ANIDESK_ENCODER")
+    forced = os.environ.get("SCREENHARBOR_ENCODER")
     test = np.zeros((360, 640, 4), np.uint8)
     for name, opts, qfn in _ENCODERS:
         if forced and name != forced:

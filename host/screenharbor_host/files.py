@@ -13,7 +13,7 @@ CHUNK = 256 * 1024
 
 
 def default_download_dir() -> Path:
-    d = Path.home() / "Downloads" / "AniDesk"
+    d = Path.home() / "Downloads" / "ScreenHarbor"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -62,7 +62,7 @@ def unique_path(directory: Path, name: str) -> Path:
 
 def zip_dir(path: Path) -> Path:
     """Zip a folder into a temp file (fast compression); caller deletes it."""
-    fd, tmp = tempfile.mkstemp(prefix="anidesk-", suffix=".zip")
+    fd, tmp = tempfile.mkstemp(prefix="screenharbor-", suffix=".zip")
     os.close(fd)
     base = path.parent
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:

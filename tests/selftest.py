@@ -3,7 +3,7 @@
     uv run --project host python tests/selftest.py
 
 Works the same on Windows, Linux and macOS. Uses free ports and a throwaway
-config dir, so it never touches your real AniDesk ID or settings.
+config dir, so it never touches your real ScreenHarbor ID or settings.
 """
 import os
 import re
@@ -27,8 +27,8 @@ def free_port() -> int:
 
 
 def start_host(url: str, home: str, *extra: str, want_relay: bool = False):
-    env = {**os.environ, "ANIDESK_HOME": home, "PYTHONUNBUFFERED": "1"}
-    p = subprocess.Popen([sys.executable, "-m", "anidesk_host", "--headless", "--server", url, *extra],
+    env = {**os.environ, "SCREENHARBOR_HOME": home, "PYTHONUNBUFFERED": "1"}
+    p = subprocess.Popen([sys.executable, "-m", "screenharbor_host", "--headless", "--server", url, *extra],
                          cwd=ROOT / "host", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     deadline = time.time() + 30
     relay = None
@@ -36,7 +36,7 @@ def start_host(url: str, home: str, *extra: str, want_relay: bool = False):
         r = re.search(r"Local relay: (ws://\S+)", line)
         if r:
             relay = r.group(1)
-        m = re.search(r"AniDesk ID: ([\d ]+)", line)
+        m = re.search(r"ScreenHarbor ID: ([\d ]+)", line)
         if m and (relay or not want_relay):
             # Keep draining output so the host never blocks on a full pipe.
             threading.Thread(target=lambda: [None for _ in p.stdout], daemon=True).start()
@@ -47,18 +47,39 @@ def start_host(url: str, home: str, *extra: str, want_relay: bool = False):
     raise SystemExit("host did not register")
 
 
+def check_history(home: str) -> bool:
+    """The e2e run must have left an AnyDesk-style trace of what happened."""
+    import json
+
+    time.sleep(1)  # last session-end records are written as connections close
+    try:
+        recs = [json.loads(x) for x in Path(home, "connections.log").read_text("utf-8").splitlines()]
+    except OSError as e:
+        print(f"  ✗ no connection history: {e}")
+        return False
+    events = {r["event"] for r in recs}
+    need = {"auth_failed", "session", "download", "upload", "terminal", "tunnel"}
+    missing = need - events
+    sessions = [r for r in recs if r["event"] == "session"]
+    good = not missing and all("duration" in r and r.get("name") for r in sessions)
+    print(f"  {'✓' if good else '✗'} history: {len(recs)} records, events {sorted(events)}"
+          + (f", missing {sorted(missing)}" if missing else ""))
+    return good
+
+
 def e2e(*args: str) -> bool:
     print(f"\n$ node tests/e2e.mjs {' '.join(args)}", flush=True)
     return subprocess.run([NODE, str(ROOT / "tests" / "e2e.mjs"), *args], cwd=ROOT).returncode == 0
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # cp1252 consoles can't print the check marks
     if not NODE:
         print("node not found: install Node.js 18+")
         return 1
     port = free_port()
     url = f"ws://127.0.0.1:{port}/ws"
-    data = tempfile.mkdtemp(prefix="anidesk-selftest-")
+    data = tempfile.mkdtemp(prefix="screenharbor-selftest-")
     procs = []
     try:
         srv = subprocess.Popen([NODE, "index.js", "--port", str(port), "--bind", "127.0.0.1",
@@ -71,6 +92,7 @@ def main() -> int:
         host, hid, _ = start_host(url, os.path.join(data, "h1"), "--no-ask", "--password", pw)
         procs.append(host)
         ok = e2e(url, hid, pw)
+        ok = check_history(os.path.join(data, "h1")) and ok
 
         # A host that asks before accepting: only unattended password or reconnect tokens get in.
         un = "Unattended-pass-2"
@@ -83,6 +105,11 @@ def main() -> int:
                                         "--password", pw, "--share-local", want_relay=True)
         procs.append(host3)
         ok = e2e(relay, hid3, pw) and ok
+
+        # The `screenharbor` command-line client (proxy / forward / term) against the same host.
+        print(f"\n$ python tests/cli_test.py {relay} {hid3} ***", flush=True)
+        ok = subprocess.run([sys.executable, str(ROOT / "tests" / "cli_test.py"), relay, hid3, pw],
+                            cwd=ROOT / "host").returncode == 0 and ok
 
         print("\nSELFTEST " + ("PASSED" if ok else "FAILED"))
         return 0 if ok else 1

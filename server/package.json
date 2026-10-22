@@ -1,7 +1,7 @@
 {
-  "name": "anidesk-server",
+  "name": "screenharbor-server",
   "version": "0.1.0",
-  "description": "AniDesk rendezvous + relay server and web viewer",
+  "description": "ScreenHarbor rendezvous + relay server and web viewer",
   "main": "index.js",
   "license": "MIT",
   "scripts": {

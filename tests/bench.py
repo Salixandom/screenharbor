@@ -77,7 +77,7 @@ except Exception as e:
     print("  simplejpeg unavailable:", e)
 
 print("== tile diff (2 consecutive grabs)")
-from anidesk_host.capture import _dirty_tiles, _merge  # noqa: E402
+from screenharbor_host.capture import _dirty_tiles, _merge  # noqa: E402
 
 a32 = frame.view(np.uint32).reshape(H, W)
 b = a32.copy()

@@ -18,6 +18,23 @@ def fmt_id(i: str) -> str:
     return " ".join(i[k:k + 3] for k in range(0, len(i), 3)) if i else "—"
 
 
+def _make_overlay(win) -> None:
+    """Windows: click-through and hidden from screen capture, so viewers don't see the tags twice."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = -20, 0x80000, 0x20, 0x80
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
+        ctypes.windll.user32.SetLayeredWindowAttributes(hwnd, 0, 235, 2)  # LWA_ALPHA
+        ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x11)  # WDA_EXCLUDEFROMCAPTURE (Win10 2004+)
+    except Exception:
+        pass
+
+
 class TkUI:
     """Thread-safe bridge: agent (asyncio thread) -> Tk (main thread)."""
 
@@ -31,6 +48,10 @@ class TkUI:
     def session_started(self, s): self.q.put(("sessions",))
     def session_ended(self, s): self.q.put(("sessions",))
     def sharing(self, url, code): self.q.put(("sharing", url, code))
+    def sharing_update(self, url, code): self.q.put(("sharing_update", url, code))
+    def peers(self): self.q.put(("sessions",))
+    def pointer(self, s, pos): self.q.put(("pointer", s.pid, s.viewer_name, s.color, pos))
+    def history(self, rec): pass
 
     async def ask(self, session) -> bool:
         fut = asyncio.get_running_loop().create_future()
@@ -39,13 +60,16 @@ class TkUI:
 
 
 class HostWindow:
-    def __init__(self, cfg: Config, password: str | None, share: bool = False) -> None:
+    def __init__(self, cfg: Config, password: str | None, share: bool = False,
+                 tunnel_hostname: str | None = None, tunnel_token_file: str | None = None) -> None:
         self.cfg = cfg
         self.ui = TkUI()
         self.agent = Agent(cfg, self.ui, password)
+        self.tunnel_hostname = tunnel_hostname or ""
+        self.tunnel_token_file = tunnel_token_file or ""
         self.loop = asyncio.new_event_loop()
         self.root = tk.Tk()
-        self.root.title("AniDesk")
+        self.root.title("ScreenHarbor")
         self.root.minsize(480, 680)
         self._build()
         threading.Thread(target=self._run_loop, daemon=True).start()
@@ -88,11 +112,22 @@ class HostWindow:
         share.pack(fill="x", padx=12, pady=(8, 0))
         self.share_btn = ttk.Button(share, text="Share via internet link", command=self._toggle_share)
         self.share_btn.grid(row=0, column=0, sticky="w")
+        self.stable_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(share, text="Keep a stable address", variable=self.stable_var).grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Label(share, text="Custom hostname (optional)").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.tunnel_hostname_var = tk.StringVar(value=self.tunnel_hostname)
+        ttk.Entry(share, textvariable=self.tunnel_hostname_var, width=30).grid(row=1, column=1, sticky="we", pady=(6, 0))
+        ttk.Label(share, text="Cloudflare token file").grid(row=2, column=0, sticky="w")
+        self.tunnel_token_file_var = tk.StringVar(value=self.tunnel_token_file)
+        ttk.Entry(share, textvariable=self.tunnel_token_file_var, width=46).grid(row=2, column=1, sticky="we")
         self.link_var = tk.StringVar()
         self.code_var = tk.StringVar()
+        self.address_var = tk.StringVar()
         self.link_entry = ttk.Entry(share, textvariable=self.link_var, state="readonly", width=46)
         self.copy_link_btn = ttk.Button(share, text="Copy link", command=lambda: self._clip(self.link_var.get()))
         self.code_label = ttk.Label(share, textvariable=self.code_var, foreground="#666")
+        self.address_label = ttk.Label(share, textvariable=self.address_var, foreground="#666")
+        self.copy_address_btn = ttk.Button(share, text="Copy address", command=lambda: self._clip(self.address_var.get()))
 
         self.status_var = tk.StringVar(value="Starting...")
         ttk.Label(r, textvariable=self.status_var, padding=(12, 4), foreground="#666").pack(fill="x")
@@ -103,16 +138,24 @@ class HostWindow:
         for i, (key, label) in enumerate((("ask", "Ask before accepting (session password)"),
                                           ("allow_input", "Allow mouse & keyboard control"),
                                           ("allow_files", "Allow file transfer"),
-                                          ("allow_clipboard", "Allow clipboard sync"))):
+                                          ("allow_clipboard", "Allow clipboard sync"),
+                                          ("allow_terminal", "Allow terminal & SSH tunnels"))):
             v = tk.BooleanVar(value=getattr(self.cfg, key))
             self.vars[key] = v
             ttk.Checkbutton(opts, text=label, variable=v, command=self._save_opts).grid(row=i, column=0, sticky="w")
 
-        sess = ttk.LabelFrame(r, text="Active sessions", padding=8)
+        sess = ttk.LabelFrame(r, text="Connected now", padding=8)
         sess.pack(fill="x", padx=12, pady=4)
-        self.sess_list = tk.Listbox(sess, height=3)
+        self.sess_list = tk.Listbox(sess, height=4)
         self.sess_list.pack(side="left", fill="x", expand=True)
-        ttk.Button(sess, text="Disconnect", command=self._disconnect).pack(side="left", padx=6)
+        side = ttk.Frame(sess)
+        side.pack(side="left", padx=6)
+        ttk.Button(side, text="Disconnect", command=self._disconnect).pack(fill="x")
+        ttk.Button(side, text="History...", command=self._show_history).pack(fill="x", pady=(4, 0))
+        self.show_cursors = tk.BooleanVar(value=True)
+        ttk.Checkbutton(side, text="Show their cursors", variable=self.show_cursors,
+                        command=self._clear_cursors).pack(fill="x", pady=(4, 0))
+        self._cursor_windows: dict = {}
 
         chat = ttk.LabelFrame(r, text="Chat & log", padding=8)
         chat.pack(fill="both", expand=True, padx=12, pady=(4, 12))
@@ -148,7 +191,7 @@ class HostWindow:
         if pw is None:
             return
         if pw and len(pw) < 8:
-            messagebox.showwarning("AniDesk", "Use at least 8 characters.", parent=self.root)
+            messagebox.showwarning("ScreenHarbor", "Use at least 8 characters.", parent=self.root)
             return
         self.agent.set_permanent_password(pw)
         self._refresh_perm_btn()
@@ -161,7 +204,10 @@ class HostWindow:
             return
 
         async def start():
-            url = await self.agent.start_sharing()
+            hostname = self.tunnel_hostname_var.get().strip() or None
+            token_file = self.tunnel_token_file_var.get().strip() or None
+            url = await self.agent.start_sharing(stable_address=self.stable_var.get(),
+                                                 tunnel_hostname=hostname, tunnel_token_file=token_file)
             while self.agent.relay is not None and self.agent.relay.host_id != self.agent.ident[0]:
                 await asyncio.sleep(0.1)
             return url
@@ -169,7 +215,8 @@ class HostWindow:
         def done(f):
             try:
                 url = f.result()
-                self.ui.q.put(("sharing", f"{url}/#id={self.agent.ident[0]}", self.agent.tunnel.code))
+                fragment = f"#address={self.agent.stable_address}" if self.agent.stable_address else f"#id={self.agent.ident[0]}"
+                self.ui.q.put(("sharing", f"{url}/{fragment}", self.agent.tunnel.code))
             except Exception as e:
                 self.ui.q.put(("sharing_err", str(e)))
 
@@ -180,12 +227,16 @@ class HostWindow:
         if link:
             self.link_var.set(link)
             self.code_var.set(f"Code: {code}   - send the link (or code) and the password")
-            self.link_entry.grid(row=1, column=0, sticky="we", pady=(6, 0))
-            self.copy_link_btn.grid(row=1, column=1, padx=4, pady=(6, 0))
-            self.code_label.grid(row=2, column=0, columnspan=2, sticky="w")
+            self.address_var.set(f"Stable address: {self.agent.stable_address}" if self.agent.stable_address else "")
+            self.link_entry.grid(row=3, column=0, sticky="we", pady=(6, 0))
+            self.copy_link_btn.grid(row=3, column=1, padx=4, pady=(6, 0))
+            self.code_label.grid(row=4, column=0, columnspan=2, sticky="w")
+            if self.agent.stable_address:
+                self.address_label.grid(row=5, column=0, sticky="w")
+                self.copy_address_btn.grid(row=5, column=1, padx=4, sticky="e")
             self._log(f"Sharing link ready: {link}")
         else:
-            for w in (self.link_entry, self.copy_link_btn, self.code_label):
+            for w in (self.link_entry, self.copy_link_btn, self.code_label, self.address_label, self.copy_address_btn):
                 w.grid_remove()
             self._log("Stopped sharing via link")
 
@@ -204,7 +255,61 @@ class HostWindow:
         self.cfg.save()
 
     def _sessions(self) -> list:
-        return sorted(self.agent.sessions, key=lambda s: s.started)
+        return self.agent.participants()
+
+    # --------------------------------------------------- viewer cursors
+    def _cursor_label(self, pid, name, color, pos) -> None:
+        """A small always-on-top name tag that follows each viewer's mouse on this screen."""
+        win = self._cursor_windows.get(pid)
+        if pos is None or not self.show_cursors.get():
+            if win is not None:
+                win.withdraw()
+            return
+        if win is None:
+            win = tk.Toplevel(self.root)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            tk.Label(win, text=f"\u25B2 {name}", bg=color, fg="#000", font=("Segoe UI", 9, "bold"),
+                     padx=4, pady=1).pack()
+            win.update_idletasks()
+            _make_overlay(win)
+            self._cursor_windows[pid] = win
+        win.geometry(f"+{pos[0] + 12}+{pos[1] + 16}")  # offset so it never sits under the click point
+        win.deiconify()
+
+    def _clear_cursors(self) -> None:
+        if not self.show_cursors.get():
+            for w in self._cursor_windows.values():
+                w.withdraw()
+
+    def _show_history(self) -> None:
+        import json as _json
+        from .config import HISTORY_FILE
+
+        top = tk.Toplevel(self.root)
+        top.title("ScreenHarbor - connection history")
+        cols = ("when", "event", "name", "ip", "method", "mode", "info")
+        tree = ttk.Treeview(top, columns=cols, show="headings", height=18)
+        for c, w in zip(cols, (130, 85, 140, 110, 80, 70, 260)):
+            tree.heading(c, text=c.capitalize())
+            tree.column(c, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+        try:
+            lines = HISTORY_FILE.read_text("utf-8").splitlines()[-500:]
+        except OSError:
+            lines = []
+        for line in reversed(lines):
+            try:
+                rec = _json.loads(line)
+            except ValueError:
+                continue
+            info = rec.get("detail", "")
+            if "duration" in rec:
+                info = f"{rec['duration'] // 60} min {rec['duration'] % 60} s"
+            tree.insert("", "end", values=(time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.get("ts", 0))),
+                                           rec.get("event", ""), rec.get("name", ""), rec.get("ip", ""),
+                                           rec.get("method", ""), rec.get("mode", ""), info))
+        ttk.Label(top, text=str(HISTORY_FILE), foreground="#666").pack(anchor="w", padx=8, pady=(0, 8))
 
     def _disconnect(self) -> None:
         sel = self.sess_list.curselection()
@@ -218,9 +323,7 @@ class HostWindow:
         if not text:
             return
         self.chat_var.set("")
-        for s in self._sessions():
-            if s.ch is not None:
-                asyncio.run_coroutine_threadsafe(s.chat(text), self.loop)
+        self.loop.call_soon_threadsafe(self.agent.host_chat, text)
         self._log(f"You: {text}")
 
     def _log(self, text: str) -> None:
@@ -276,18 +379,27 @@ class HostWindow:
                     self.root.bell()
                 elif kind == "ask":
                     self._ask(ev[1], ev[2])
+                elif kind == "pointer":
+                    self._cursor_label(*ev[1:])
                 elif kind == "sharing":
+                    self._show_share(ev[1], ev[2])
+                elif kind == "sharing_update":
                     self._show_share(ev[1], ev[2])
                 elif kind == "sharing_err":
                     self.share_btn.config(state="normal", text="Share via internet link")
                     self._log(f"Could not share: {ev[1]}")
-                    messagebox.showerror("AniDesk", "Could not open the sharing link:\n" + ev[1], parent=self.root)
+                    messagebox.showerror("ScreenHarbor", "Could not open the sharing link:\n" + ev[1], parent=self.root)
                 elif kind == "sessions":
                     self.sess_list.delete(0, "end")
-                    for s in self._sessions():
-                        if s.ch is not None:
-                            self.sess_list.insert("end", "● " + s.label)
-                    self.root.title("AniDesk - REMOTE SESSION ACTIVE" if self.sess_list.size() else "AniDesk")
+                    for i, s in enumerate(self._sessions()):
+                        mins = int(time.time() - s.started) // 60
+                        self.sess_list.insert("end", f"● {s.viewer_name}  ·  {s.ip}  ·  {s.mode}  ·  "
+                                                     f"{s.method}  ·  {mins} min")
+                        self.sess_list.itemconfig(i, foreground=s.color)
+                    live = {s.pid for s in self._sessions()}
+                    for pid in [p for p in self._cursor_windows if p not in live]:
+                        self._cursor_windows.pop(pid).destroy()
+                    self.root.title("ScreenHarbor - REMOTE SESSION ACTIVE" if self.sess_list.size() else "ScreenHarbor")
         except queue.Empty:
             pass
         self.root.after(100, self._poll)

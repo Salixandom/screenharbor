@@ -1,4 +1,4 @@
-"""AniDesk host entry point:  python -m anidesk_host [--headless] ..."""
+"""ScreenHarbor host entry point:  python -m screenharbor_host [--headless] ..."""
 from __future__ import annotations
 
 import argparse
@@ -22,21 +22,51 @@ def _dpi_aware() -> None:
             pass
 
 
-def _check_display() -> None:
+def _has_display() -> bool:
+    """Screen sharing needs a desktop; without one we still offer terminal + SSH tunnels."""
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         if os.environ.get("WAYLAND_DISPLAY"):
-            sys.exit("AniDesk needs an X11 session (Wayland screen capture/input is not supported yet). "
-                     "Log in with 'GNOME on Xorg' / 'Plasma (X11)', or run under Xwayland with DISPLAY set.")
-        sys.exit("No X display found (DISPLAY is not set).")
+            print("[note] Wayland screen capture/input isn't supported yet: offering terminal access only. "
+                  "Log in with an X11 session for screen sharing.", flush=True)
+        else:
+            print("[note] No display found: offering terminal access only (shell + SSH tunnels).", flush=True)
+        return False
+    return True
+
+
+def _print_history(limit: int = 50) -> None:
+    import json
+    import time
+
+    from .config import HISTORY_FILE
+
+    try:
+        lines = HISTORY_FILE.read_text("utf-8").splitlines()[-limit:]
+    except OSError:
+        print("No connection history yet.")
+        return
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("ts", 0)))
+        dur = f" {r['duration'] // 60}m{r['duration'] % 60:02d}s" if "duration" in r else ""
+        detail = f"  {r['detail']}" if r.get("detail") else ""
+        print(f"{when}  {r.get('event', ''):<11} {r.get('name', ''):<20} {r.get('ip', ''):<16} "
+              f"{r.get('method', ''):<10} {r.get('mode', ''):<8}{dur}{detail}")
 
 
 class ConsoleUI:
     def status(self, text): print(f"[status] {text}", flush=True)
-    def id_changed(self, i): print(f"\n  AniDesk ID: {' '.join(i[k:k + 3] for k in range(0, len(i), 3))}\n", flush=True)
+    def id_changed(self, i): print(f"\n  ScreenHarbor ID: {' '.join(i[k:k + 3] for k in range(0, len(i), 3))}\n", flush=True)
     def log(self, text): print(f"[log] {text}", flush=True)
     def chat(self, s, text): print(f"[chat] {s.viewer_name}: {text}", flush=True)
     def session_started(self, s): print(f"[session] REMOTE SESSION ACTIVE: {s.label}", flush=True)
     def session_ended(self, s): print(f"[session] ended: {s.label}", flush=True)
+    def peers(self): pass
+    def pointer(self, s, pos): pass
+    def history(self, rec): pass
 
     async def ask(self, session) -> bool:
         return False  # headless mode never auto-accepts unknown viewers
@@ -44,11 +74,13 @@ class ConsoleUI:
 
 async def _headless(agent, a, pw: str) -> None:
     if a.share or a.share_local:
-        await agent.start_relay()  # before connecting, so we never try the normal server first
+        await agent.start_relay(port=8765 if a.tunnel_token_file else 0)  # bind before connecting to the local relay
     run = asyncio.create_task(agent.run())
     if a.share or a.share_local:
         try:
-            url = await agent.start_sharing(use_tunnel=not a.share_local)
+            url = await agent.start_sharing(use_tunnel=not a.share_local, stable_address=a.stable_address,
+                                            tunnel_hostname=a.tunnel_hostname,
+                                            tunnel_token_file=a.tunnel_token_file)
         except Exception as e:
             print(f"[error] could not start sharing: {e}", flush=True)
         else:
@@ -57,8 +89,11 @@ async def _headless(agent, a, pw: str) -> None:
             if a.share:
                 code = agent.tunnel.code
                 print("\n  ================= Share this =================", flush=True)
-                print(f"  Link:     {url}/#id={agent.ident[0]}", flush=True)
-                print(f"  Code:     {code}   (type it into any AniDesk viewer)", flush=True)
+                fragment = f"#address={agent.stable_address}" if agent.stable_address else f"#id={agent.ident[0]}"
+                print(f"  Link:     {url}/{fragment}", flush=True)
+                print(f"  Code:     {code}   (type it into any ScreenHarbor viewer)", flush=True)
+                if agent.stable_address:
+                    print(f"  Address:  {agent.stable_address}   (resolves to the current link)", flush=True)
                 print(f"  Password: {pw}", flush=True)
                 print("  ===============================================\n", flush=True)
     try:
@@ -70,7 +105,7 @@ async def _headless(agent, a, pw: str) -> None:
 def main(argv=None) -> None:
     from .config import Config, generate_password
 
-    ap = argparse.ArgumentParser(prog="anidesk-host", description="Share this computer via AniDesk.")
+    ap = argparse.ArgumentParser(prog="screenharbor-host", description="Share this computer via ScreenHarbor.")
     ap.add_argument("--server", help="ID/relay server, e.g. ws://192.168.1.10:8080/ws")
     ap.add_argument("--password", help="session password (default: random, shown on screen)")
     ap.add_argument("--set-unattended-password", metavar="PW",
@@ -85,13 +120,26 @@ def main(argv=None) -> None:
     ap.add_argument("--share", action="store_true",
                     help="no server needed: host a built-in relay and share it through a temporary Cloudflare "
                          "link (https://<words>.trycloudflare.com)")
+    ap.add_argument("--stable-address", action="store_true",
+                    help="publish a signed stable address that follows changing quick-tunnel URLs")
+    ap.add_argument("--tunnel-hostname", help="custom hostname routed to this host by a named Cloudflare tunnel")
+    ap.add_argument("--tunnel-token-file", help="file containing the remotely-managed Cloudflare tunnel token")
     ap.add_argument("--share-local", action="store_true", help=argparse.SUPPRESS)  # built-in relay only (tests)
+    ap.add_argument("--terminal-only", action="store_true",
+                    help="offer only terminal + SSH tunnels, never the screen (automatic without a display)")
+    ap.add_argument("--no-terminal", action="store_true", help="disable terminal and TCP tunnel access")
+    ap.add_argument("--history", action="store_true", help="print the connection history and exit")
     ap.add_argument("--install-autostart", action="store_true",
                     help="start the host at login with the other options given here, then exit")
     ap.add_argument("--uninstall-autostart", action="store_true", help="remove the login autostart entry")
     ap.add_argument("-v", "--verbose", action="store_true")
     raw = list(sys.argv[1:] if argv is None else argv)
     a = ap.parse_args(raw)
+
+    if bool(a.tunnel_hostname) != bool(a.tunnel_token_file):
+        ap.error("--tunnel-hostname and --tunnel-token-file must be provided together")
+    if (a.tunnel_hostname or a.tunnel_token_file) and not a.share:
+        ap.error("named Cloudflare tunnels require --share")
 
     if a.install_autostart or a.uninstall_autostart:
         from . import autostart
@@ -117,7 +165,12 @@ def main(argv=None) -> None:
                 keep.append(x)
         print("Installed autostart:", autostart.install(keep))
         return
-    _check_display()
+    if a.history:
+        _print_history()
+        return
+    desktop_ok = not a.terminal_only and _has_display()
+    if not desktop_ok and not a.headless:
+        a.headless = True  # no display means no window either
 
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(message)s")
     _dpi_aware()
@@ -135,6 +188,8 @@ def main(argv=None) -> None:
         cfg.allow_files = False
     if a.no_clipboard:
         cfg.allow_clipboard = False
+    if a.no_terminal:
+        cfg.allow_terminal = False
     if a.insecure:
         cfg.insecure_tls = True
     cfg.save()
@@ -143,6 +198,7 @@ def main(argv=None) -> None:
         from .agent import Agent
         pw = a.password or generate_password()
         agent = Agent(cfg, ConsoleUI(), pw)
+        agent.desktop_ok = desktop_ok
         if a.set_unattended_password is not None:
             agent.set_permanent_password(a.set_unattended_password)
         if cfg.ask:
@@ -155,7 +211,8 @@ def main(argv=None) -> None:
         return
 
     from .gui import HostWindow
-    w = HostWindow(cfg, a.password, share=a.share)
+    w = HostWindow(cfg, a.password, share=a.share, tunnel_hostname=a.tunnel_hostname,
+                   tunnel_token_file=a.tunnel_token_file)
     if a.set_unattended_password is not None:
         w.agent.set_permanent_password(a.set_unattended_password)
         w._refresh_perm_btn()

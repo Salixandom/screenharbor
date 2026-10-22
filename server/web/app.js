@@ -1,11 +1,11 @@
 'use strict';
 /*
- * AniDesk web viewer.
- * Protocol and crypto must match host/anidesk_host/crypto.py and session.py.
+ * ScreenHarbor web viewer.
+ * Protocol and crypto must match host/screenharbor_host/crypto.py and session.py.
  */
 (() => {
   const $ = (id) => document.getElementById(id);
-  const K_JSON = 1, K_FRAME = 2, K_FILE = 3, K_VIDEO = 4;
+  const K_JSON = 1, K_FRAME = 2, K_FILE = 3, K_VIDEO = 4, K_TERM = 5;
   const CHUNK = 256 * 1024;
   const MAX_RECONNECTS = 10;
   const te = new TextEncoder(), td = new TextDecoder();
@@ -83,7 +83,7 @@
     static async create(shared, pwk, hostPub, viewerPub) {
       const ikm = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
       const okm = new Uint8Array(await crypto.subtle.deriveBits(
-        { name: 'HKDF', hash: 'SHA-256', salt: pwk, info: concat(te.encode('anidesk/v1'), hostPub, viewerPub) },
+        { name: 'HKDF', hash: 'SHA-256', salt: pwk, info: concat(te.encode('screenharbor/v1'), hostPub, viewerPub) },
         ikm, 512));
       const imp = (b) => crypto.subtle.importKey('raw', b, 'AES-GCM', false, ['encrypt', 'decrypt']);
       const c = new Channel();
@@ -118,12 +118,53 @@
   /** "123 456 789" -> same-origin server; share code / trycloudflare link -> that host's built-in relay. */
   function parseTarget(raw) {
     const s = raw.trim();
+    if (/^(?:screen|ani)-[0-9a-f]{40}$/i.test(s)) return { id: '', label: s.toLowerCase(), stable: s.toLowerCase() };
+    const addressLink = /#address=((?:screen|ani)-[0-9a-f]{40})/i.exec(s);
+    if (addressLink) return { id: '', label: addressLink[1].toLowerCase(), stable: addressLink[1].toLowerCase() };
     const digits = s.replace(/[\s-]/g, '');
     if (/^\d{9,}$/.test(digits)) return { id: digits, label: fmtId(digits) };
     const m = /^(?:https?:\/\/)?([a-z0-9-]+)\.trycloudflare\.com\/?(?:#id=(\d+))?/i.exec(s);
-    const code = m ? m[1].toLowerCase() : /^[a-z0-9]+(-[a-z0-9]+)+$/i.test(s) ? s.toLowerCase() : null;
-    if (!code) return null;
-    return { id: (m && m[2]) || '', label: code, ws: `wss://${code}.trycloudflare.com/ws` };
+    if (m) return { id: m[2] || '', label: m[1].toLowerCase(), ws: `wss://${m[1].toLowerCase()}.trycloudflare.com/ws` };
+    if (/^https:\/\/[a-z0-9.-]+\/?(?:#id=\d+)?$/i.test(s)) {
+      const url = new URL(s.replace(/#id=.*/, ''));
+      if (!url.hostname.includes('.') || url.username || url.password) return null;
+      return { id: (/#id=(\d+)/i.exec(s) || [])[1] || '', label: url.hostname, ws: `wss://${url.hostname}/ws` };
+    }
+    const code = /^[a-z0-9]+(-[a-z0-9]+)+$/i.test(s) ? s.toLowerCase() : null;
+    return code ? { id: '', label: code, ws: `wss://${code}.trycloudflare.com/ws` } : null;
+  }
+
+  async function resolveStableAddress(addr) {
+    const topicPrefix = addr.startsWith('ani-') ? 'anidesk-' : 'screenharbor-';
+    const topic = `https://ntfy.sh/${topicPrefix}${addr.slice(addr.indexOf('-') + 1)}/json?poll=1&since=latest`;
+    const response = await fetch(topic, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Address lookup failed (HTTP ${response.status}).`);
+    const records = [];
+    for (const line of (await response.text()).split(/\r?\n/)) {
+      try {
+        const event = JSON.parse(line);
+        const rec = typeof event.message === 'string' ? JSON.parse(event.message) : event.message || event;
+        const pub = Uint8Array.from(atob(rec.pub), (c) => c.charCodeAt(0));
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', pub));
+        const fingerprint = [...digest.slice(0, 20)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        const addressHash = addr.slice(addr.indexOf('-') + 1);
+        if (rec.v !== 1 || rec.address !== addr || fingerprint !== addressHash || !['online', 'offline'].includes(rec.state)) continue;
+        const signed = Object.fromEntries(['address', 'expires', 'id', 'issued', 'pub', 'state', 'url', 'v']
+          .sort().map((key) => [key, rec[key]]));
+        const key = await crypto.subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
+        const sig = Uint8Array.from(atob(rec.sig), (c) => c.charCodeAt(0));
+        if (!await crypto.subtle.verify('Ed25519', key, sig, te.encode(JSON.stringify(signed)))) continue;
+        const now = Math.floor(Date.now() / 1000);
+        if (rec.issued < now - 300 || rec.issued > now + 300 || rec.expires <= now || rec.expires > now + 10 * 3600 + 300) continue;
+        if ((rec.state === 'online' && !/^https:\/\/[a-z0-9.-]+$/i.test(rec.url)) ||
+            (rec.state === 'offline' && rec.url !== '') || !/^\d{9,}$/.test(String(rec.id))) continue;
+        records.push(rec);
+      } catch { /* ignore malformed, expired, or invalidly signed public records */ }
+    }
+    if (!records.length) throw new Error('No current signed mapping found. The host may be offline.');
+    const latest = records.sort((a, b) => b.issued - a.issued)[0];
+    if (latest.state === 'offline') throw new Error('This ScreenHarbor address is currently offline.');
+    return latest;
   }
 
   class Session {
@@ -145,6 +186,8 @@
       this.closedByUser = false; this.fatal = false;
       this.decoder = null; this.decoderCodec = null; this.pendingAcks = []; this.keyRequested = 0;
       this.cursor = null; this.lastLocalInput = 0;
+      this.peers = []; this.you = null; this.peerPointers = new Map();
+      this.term = null; this.termFit = null; this.termId = null; this.termOpenWaiters = new Map(); this.termResizeObserver = null;
     }
 
     start() {
@@ -220,6 +263,37 @@
     }
     sendSettings() { this.send({ t: 'settings', ...this.settings }); }
 
+    async openTerminal() {
+      if (!this.perms.terminal) throw new Error('Terminal access is disabled on this host.');
+      if (this.termId !== null) { this.term?.focus(); return; }
+      if (!this.term) {
+        if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') throw new Error('Terminal assets failed to load.');
+        this.term = new Terminal({ convertEol: true, cursorBlink: true, fontSize: 13,
+          theme: { background: '#111318', foreground: '#e7e9ee', cursor: '#e8473f' } });
+        this.termFit = new FitAddon.FitAddon();
+        this.term.loadAddon(this.termFit);
+        this.term.open($('terminal-view'));
+        this.term.onData((data) => {
+          if (this.termId !== null) this.sendPlain(concat([K_TERM], u32(this.termId), te.encode(data)));
+        });
+        this.term.onResize(({ cols, rows }) => {
+          if (this.termId !== null) this.send({ t: 'term_resize', id: this.termId, cols, rows });
+        });
+        this.termResizeObserver = new ResizeObserver(() => { if (!this.termId && !this.active) return; this.termFit.fit(); });
+        this.termResizeObserver.observe($('terminal-view'));
+      }
+      this.termFit.fit();
+      const id = this.fileId++;
+      this.termId = id;
+      const opened = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { this.termOpenWaiters.delete(id); reject(new Error('Terminal did not respond.')); }, 15000);
+        this.termOpenWaiters.set(id, { resolve, reject, timer });
+      });
+      this.send({ t: 'term_open', id, cols: this.term.cols, rows: this.term.rows });
+      try { await opened; this.term.focus(); }
+      catch (e) { this.termId = null; throw e; }
+    }
+
     // ------------------------------------------------------- receiving
     async onPlain(pt) {
       const kind = pt[0], body = pt.subarray(1);
@@ -227,6 +301,10 @@
       if (kind === K_VIDEO) return this.decodeVideo(body);
       if (kind === K_FRAME) return this.drawFrame(body);
       if (kind === K_FILE) return this.onFileChunk(body);
+      if (kind === K_TERM) {
+        if (body.length < 4 || !this.term || new DataView(body.buffer, body.byteOffset, 4).getUint32(0) !== this.termId) return;
+        this.term.write(body.subarray(4));
+      }
     }
 
     onJson(m) {
@@ -237,6 +315,17 @@
         case 'screen': return this.onScreen(m);
         case 'hstats': this.host = m; return;
         case 'cur': this.cursor = m; return placeCursor();
+        case 'peers': this.peers = Array.isArray(m.list) ? m.list : []; this.you = m.you; return renderPeers();
+        case 'pcur': this.peerPointers.set(m.p, m); return renderPeerCursors();
+        case 'term_opened': {
+          const waiter = this.termOpenWaiters.get(m.id); this.termOpenWaiters.delete(m.id);
+          if (waiter) { clearTimeout(waiter.timer); waiter.resolve(m); } return;
+        }
+        case 'term_err': {
+          const waiter = this.termOpenWaiters.get(m.id); this.termOpenWaiters.delete(m.id);
+          if (waiter) { clearTimeout(waiter.timer); waiter.reject(new Error(m.msg || 'Could not open terminal.')); } return;
+        }
+        case 'term_closed': if (m.id === this.termId) { this.termId = null; this.termOpenWaiters.delete(m.id); } return;
         case 'clip': return this.onRemoteClip(m.s);
         case 'chat': return chatLine(this.hostName, m.s, false);
         case 'ls': return this.onListing(m);
@@ -262,6 +351,7 @@
       $('peer-name').textContent = `${m.name} · ${this.target.label} · end-to-end encrypted`;
       $('btn-files').disabled = !this.perms.files;
       $('btn-clip').disabled = !this.perms.clipboard;
+      $('btn-terminal').disabled = !this.perms.terminal;
       $('chk-viewonly').checked = this.viewOnly = !this.perms.input || $('chk-viewonly').checked && $('chk-viewonly').dataset.user === '1';
       $('chk-viewonly').disabled = !this.perms.input;
       const h264 = !!m.encoder && h264Support;
@@ -474,6 +564,13 @@
     }
     onClose() {
       clearInterval(this.statsTimer);
+      for (const waiter of this.termOpenWaiters.values()) {
+        clearTimeout(waiter.timer); waiter.reject(new Error('Connection closed before the terminal opened.'));
+      }
+      this.termOpenWaiters.clear();
+      this.termResizeObserver?.disconnect(); this.termResizeObserver = null;
+      this.term?.dispose(); this.term = this.termFit = null; this.termId = null;
+      $('terminal-view').replaceChildren(); $('panel-terminal').classList.add('hidden');
       this.resetDecoder();
       const wasActive = this.active;
       this.active = false;
@@ -492,10 +589,21 @@
     const attempt = old.attempt + 1;
     const delay = Math.min(1000 * 2 ** (attempt - 1), 8000);
     overlay(`Connection lost — reconnecting (${attempt}/${MAX_RECONNECTS})…`);
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      current = new Session(old.target, old.password, old.name, { token: old.token, settings: old.settings, attempt });
-      current.start();
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    const target = { ...old.target };
+    if (target.stable) {
+      try {
+        const record = await resolveStableAddress(target.stable);
+        target.id = record.id; target.ws = `${record.url.replace(/^https:/, 'wss:')}/ws`;
+      } catch (e) {
+        old.attempt = attempt;
+        old.error = `Stable address lookup failed: ${e.message}`;
+        return scheduleReconnect(old);
+      }
+    }
+    current = new Session(target, old.password, old.name, { token: old.token, settings: old.settings, attempt });
+    current.start();
     }, delay);
   }
 
@@ -518,6 +626,7 @@
     for (const p of document.querySelectorAll('.panel')) p.classList.add('hidden');
     $('connect-btn').disabled = false;
     $('rcursor').classList.add('hidden');
+    $('peer-cursors').replaceChildren();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   }
   function layout() {
@@ -527,6 +636,7 @@
     canvas.style.width = Math.floor(canvas.width * k) + 'px';
     canvas.style.height = Math.floor(canvas.height * k) + 'px';
     placeCursor();
+    renderPeerCursors();
   }
   window.addEventListener('resize', layout);
 
@@ -544,6 +654,43 @@
     c.classList.remove('hidden');
   }
 
+  function renderPeers() {
+    const peers = current ? current.peers : [];
+    $('peer-count').textContent = String(peers.length || 1);
+    $('peer-list').replaceChildren(...peers.map((p) => {
+      const row = el('li', 'peer-row');
+      const dot = el('span', 'peer-dot');
+      dot.style.backgroundColor = p.color || 'var(--ok)';
+      const label = el('span', 'peer-label', p.name || (p.host ? 'Host' : 'Viewer'));
+      const detail = el('span', 'peer-detail', p.host ? 'host' : (p.p === current?.you ? 'you' : (p.mode || 'viewer')));
+      row.append(dot, label, detail);
+      return row;
+    }));
+    renderPeerCursors();
+  }
+
+  function renderPeerCursors() {
+    const root = $('peer-cursors');
+    if (!current?.active || !canvas.width || !canvas.height) { root.replaceChildren(); return; }
+    const stage = $('stage').getBoundingClientRect(), screen = canvas.getBoundingClientRect();
+    const active = new Set();
+    for (const [id, p] of current.peerPointers) {
+      if (id === current.you || p.x == null || p.y == null || p.x < 0 || p.y < 0 || p.x > 1 || p.y > 1) continue;
+      active.add(id);
+      let marker = [...root.children].find((n) => n.dataset.peer === id);
+      if (!marker) {
+        marker = el('div', 'peer-pointer'); marker.dataset.peer = id;
+        marker.append(el('span', 'peer-arrow'), el('span', 'peer-tag'));
+        root.append(marker);
+      }
+      marker.style.setProperty('--peer-color', p.color || '#4ea1ff');
+      marker.style.left = `${screen.left - stage.left + p.x * screen.width}px`;
+      marker.style.top = `${screen.top - stage.top + p.y * screen.height}px`;
+      marker.querySelector('.peer-tag').textContent = p.name || 'Viewer';
+    }
+    for (const marker of [...root.children]) if (!active.has(marker.dataset.peer)) marker.remove();
+  }
+
   function chatLine(who, text, me) {
     const d = el('div'); const w = el('b', me ? 'me' : null, who + ': ');
     d.append(w, document.createTextNode(text)); $('chat-log').append(d);
@@ -551,10 +698,10 @@
     if (!me && $('panel-chat').classList.contains('hidden')) { $('chat-badge').classList.remove('hidden'); toast(`${who}: ${text}`); }
   }
 
-  function loadRecent() { try { return JSON.parse(localStorage.getItem('anidesk.recent')) || []; } catch { return []; } }
+  function loadRecent() { try { return JSON.parse(localStorage.getItem('screenharbor.recent')) || []; } catch { return []; } }
   function saveRecent(id, name) {
     const list = [{ id, name }, ...loadRecent().filter((r) => r.id !== id)].slice(0, 6);
-    localStorage.setItem('anidesk.recent', JSON.stringify(list));
+    localStorage.setItem('screenharbor.recent', JSON.stringify(list));
   }
   function renderRecent() {
     $('recent').replaceChildren(...loadRecent().map((r) => {
@@ -566,12 +713,13 @@
   }
 
   // ---------------------------------------------------- connect form
-  $('viewer-name').value = localStorage.getItem('anidesk.name') || '';
+  $('viewer-name').value = localStorage.getItem('screenharbor.name') || '';
   const params = new URLSearchParams(location.hash.slice(1));
-  if (params.get('id')) $('remote-id').value = fmtId(params.get('id'));
+  if (params.get('address')) $('remote-id').value = params.get('address');
+  else if (params.get('id')) $('remote-id').value = fmtId(params.get('id'));
   renderRecent();
 
-  $('connect-form').addEventListener('submit', (e) => {
+  $('connect-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!window.isSecureContext || !crypto.subtle) {
       status('Encryption needs a secure page. Open this viewer via https:// (start the server with ' +
@@ -579,15 +727,25 @@
       return;
     }
     const target = parseTarget($('remote-id').value);
-    if (!target) return status('Enter the 9-digit ID, or the share code / link from the other computer.', true);
+    if (!target) return status('Enter the 9-digit ID, share code / link, or stable ScreenHarbor address.', true);
     const name = $('viewer-name').value.trim() || 'Web viewer';
-    localStorage.setItem('anidesk.name', $('viewer-name').value.trim());
+    localStorage.setItem('screenharbor.name', $('viewer-name').value.trim());
     $('connect-btn').disabled = true;
     status('Connecting...');
-    // The password stays in memory for this tab only, so a dropped session can reconnect.
-    current = new Session(target, $('remote-pw').value, name);
-    $('remote-pw').value = '';
-    current.start();
+    try {
+      if (target.stable) {
+        status('Looking up stable address…');
+        const record = await resolveStableAddress(target.stable);
+        target.id = record.id; target.ws = `${record.url.replace(/^https:/, 'wss:')}/ws`;
+      }
+      // The password stays in memory for this tab only, so a dropped session can reconnect.
+      current = new Session(target, $('remote-pw').value, name);
+      $('remote-pw').value = '';
+      current.start();
+    } catch (err) {
+      $('connect-btn').disabled = false;
+      status(err.message || 'Could not resolve that address.', true);
+    }
   });
 
   // ------------------------------------------------------------ input
@@ -771,7 +929,7 @@
 
   $('btn-shot').addEventListener('click', () => {
     if (!canvas.width) return;
-    canvas.toBlob((b) => b && saveBlob(b, `anidesk-${current ? current.id : 'screen'}-${stamp()}.png`), 'image/png');
+    canvas.toBlob((b) => b && saveBlob(b, `screenharbor-${current ? current.id : 'screen'}-${stamp()}.png`), 'image/png');
   });
 
   let recorder = null;
@@ -786,7 +944,7 @@
     recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     recorder.onstop = () => {
       $('btn-rec').classList.remove('on'); $('btn-rec').textContent = '⏺ Rec';
-      saveBlob(new Blob(chunks, { type }), `anidesk-${current ? current.id : 'session'}-${stamp()}.${type.includes('mp4') ? 'mp4' : 'webm'}`);
+      saveBlob(new Blob(chunks, { type }), `screenharbor-${current ? current.id : 'session'}-${stamp()}.${type.includes('mp4') ? 'mp4' : 'webm'}`);
     };
     recorder.start(1000);
     $('btn-rec').classList.add('on'); $('btn-rec').textContent = '⏹ Stop';
@@ -798,10 +956,22 @@
     const p = $(id); p.classList.toggle('hidden');
     return !p.classList.contains('hidden');
   }
-  for (const b of document.querySelectorAll('[data-close]')) b.addEventListener('click', () => { $(b.dataset.close).classList.add('hidden'); canvas.focus(); });
+  for (const b of document.querySelectorAll('[data-close]')) b.addEventListener('click', () => {
+    const id = b.dataset.close;
+    $(id).classList.add('hidden');
+    if (id === 'panel-terminal' && current?.termId !== null && current?.termId !== undefined) {
+      current.send({ t: 'term_close', id: current.termId }); current.termId = null;
+    }
+    canvas.focus();
+  });
   $('btn-files').addEventListener('click', () => { if (togglePanel('panel-files') && current.fsPath === null) current.ls('~'); });
   $('btn-clip').addEventListener('click', () => togglePanel('panel-clip'));
   $('btn-chat').addEventListener('click', () => { if (togglePanel('panel-chat')) { $('chat-badge').classList.add('hidden'); $('chat-input').focus(); } });
+  $('btn-peers').addEventListener('click', () => togglePanel('panel-peers'));
+  $('btn-terminal').addEventListener('click', () => {
+    if (!togglePanel('panel-terminal')) return;
+    requestAnimationFrame(() => current?.openTerminal().catch((e) => toast(e.message)));
+  });
 
   $('fs-up').addEventListener('click', () => { if (current.fsParent !== null) current.ls(current.fsParent); });
   $('fs-home').addEventListener('click', () => current.ls('~'));

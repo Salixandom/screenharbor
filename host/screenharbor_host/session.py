@@ -2,7 +2,11 @@
 
 After pairing, everything is end-to-end encrypted (see crypto.py). Each
 decrypted message starts with a kind byte:
-    1 = JSON control, 2 = JPEG tile frame, 3 = file chunk (u32 id | data), 4 = H.264 frame
+    1 = JSON control, 2 = JPEG tile frame, 3 = file chunk (u32 id | data), 4 = H.264 frame,
+    5 = terminal data (u32 id | bytes), 6 = TCP tunnel data (u32 id | bytes)
+
+Modes: "desktop" (screen + input + everything) or "terminal" (shells and TCP tunnels
+only: no screen capture, works on machines without a display).
 """
 from __future__ import annotations
 
@@ -21,14 +25,12 @@ from pathlib import Path
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from . import files
-from .capture import Capturer
+from . import files, terminal
 from .crypto import Handshake
-from .inputctl import InputController
 
-log = logging.getLogger("anidesk")
+log = logging.getLogger("screenharbor")
 
-K_JSON, K_FRAME, K_FILE, K_VIDEO = 1, 2, 3, 4
+K_JSON, K_FRAME, K_FILE, K_VIDEO, K_TERM, K_TCP = 1, 2, 3, 4, 5, 6
 REFINE_AFTER = 0.4   # seconds of a static screen before the JPEG sharpening pass
 ADAPT_EVERY = 2.0    # seconds between bitrate decisions
 MIN_BITRATE = 300_000
@@ -71,9 +73,18 @@ class Session:
         self.started = time.time()
         self.ws = None
         self.ch = None
-        self.cap: Capturer | None = None
+        self.cap = None          # capture.Capturer (desktop mode only; imported lazily)
         self.geo: dict | None = None
-        self.input = InputController()
+        self._input = None       # inputctl.InputController, created on first use
+        self.mode = "desktop"
+        self.method = "password"  # how they got in: password | unattended | token
+        self.pid = ""            # short participant id shown to others
+        self.color = "#e8473f"
+        self.pointer = None      # last (x, y) of this viewer's mouse, normalized to their monitor
+        self.welcomed = False
+        self._terms: dict = {}
+        self._tcps: dict = {}
+        self._pumps: set = set()
         self.monitor, self.scale, self.quality, self.fps = 1, 1, 60, 30
         self.codec_pref = "auto"
         self.viewer_codecs: set = {"jpeg"}
@@ -88,7 +99,7 @@ class Session:
         self._blocked = 0.0
         self._sent_bytes = 0
         self._send_lock = asyncio.Lock()
-        self._ex = ThreadPoolExecutor(1, thread_name_prefix="anidesk-capture")
+        self._ex = ThreadPoolExecutor(1, thread_name_prefix="screenharbor-capture")
         self._uploads: dict[int, dict] = {}
         self._downloads: dict[int, asyncio.Task] = {}
         self._last_clip = None
@@ -97,6 +108,13 @@ class Session:
     @property
     def label(self) -> str:
         return f"{self.viewer_name} ({self.ip})"
+
+    @property
+    def input(self):
+        if self._input is None:
+            from .inputctl import InputController  # needs a display; only import when used
+            self._input = InputController()
+        return self._input
 
     # --------------------------------------------------------------- send
     async def _send(self, kind: int, payload: bytes) -> None:
@@ -134,7 +152,14 @@ class Session:
         except Exception:
             log.exception("session %s failed", self.sid[:8])
         finally:
-            self.input.release_all()
+            if self._input is not None:
+                self._input.release_all()
+            for t in list(self._pumps):
+                t.cancel()
+            for pty in self._terms.values():
+                pty.close()
+            for w in self._tcps.values():
+                w.close()
             for t in self._downloads.values():
                 t.cancel()
             for u in self._uploads.values():
@@ -182,34 +207,50 @@ class Session:
                 auth, self.ch, self.used_permanent_password = msg, ch, i > 0
         if auth is None:
             agent.record_failure(self.ip)
+            agent.trace("auth_failed", self)
             await ws.send(json.dumps({"t": "auth_failed"}))
             return False
 
         self.viewer_name = str(auth.get("name") or "viewer")[:40]
         self.viewer_codecs = {str(c) for c in auth.get("codecs") or ["jpeg"]}
+        self.mode = "terminal" if auth.get("mode") == "terminal" or not agent.desktop_ok else "desktop"
         token_ok = agent.check_token(auth.get("token"))
+        self.method = "token" if token_ok else "unattended" if self.used_permanent_password else "password"
         if not token_ok and not await agent.confirm(self):
+            agent.trace("denied", self)
             await self.send_json({"t": "denied"})
             return False
 
-        self.cap = await self._x(Capturer)
         cfg = agent.cfg
-        await self.send_json({
-            "t": "welcome", "name": socket.gethostname(), "os": platform.system(),
-            "perms": {"input": cfg.allow_input, "files": cfg.allow_files, "clipboard": cfg.allow_clipboard},
-            "monitors": await self._x(self.cap.monitors),
-            "encoder": self.cap.encoder_name,
-        })
+        agent.assign_participant(self)
+        welcome = {
+            "t": "welcome", "name": socket.gethostname(), "os": platform.system(), "mode": self.mode,
+            "you": self.pid, "color": self.color,
+            "perms": {"input": cfg.allow_input, "files": cfg.allow_files, "clipboard": cfg.allow_clipboard,
+                      "terminal": cfg.allow_terminal},
+            "monitors": [], "encoder": None,
+        }
+        if self.mode == "desktop":
+            from .capture import Capturer  # numpy/mss/av only when the screen is shared
+
+            self.cap = await self._x(Capturer)
+            welcome["monitors"] = await self._x(self.cap.monitors)
+            welcome["encoder"] = self.cap.encoder_name
+        await self.send_json(welcome)
         # Lets the viewer reconnect after a network drop without another Accept prompt.
         await self.send_json({"t": "token", "v": agent.issue_token()})
-        agent.ui.log(f"Session started: {self.label}" + (" (reconnected)" if token_ok else ""))
+        self.welcomed = True
+        agent.ui.log(f"Session started: {self.label} [{self.mode}, {self.method}]")
         return True
 
     async def _main(self) -> None:
-        tasks = [asyncio.create_task(self._recv_loop()), asyncio.create_task(self._video_loop()),
-                 asyncio.create_task(self._stats_loop())]
-        if self.agent.cfg.allow_clipboard:
-            tasks.append(asyncio.create_task(self._clipboard_loop()))
+        tasks = [asyncio.create_task(self._recv_loop())]
+        if self.mode == "desktop":
+            tasks += [asyncio.create_task(self._video_loop()), asyncio.create_task(self._stats_loop()),
+                      asyncio.create_task(self._cursor_loop())]
+            if self.agent.cfg.allow_clipboard:
+                tasks.append(asyncio.create_task(self._clipboard_loop()))
+        self.agent.participants_changed()
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
@@ -299,21 +340,23 @@ class Session:
                 self._inflight.append((self._frame_no, len(payload), time.monotonic()))
                 self._inflight_bytes += len(payload)
                 await self._send(kind, payload)
-            await self._send_cursor()
             await asyncio.sleep(max(0.0, 1 / self.fps - (time.monotonic() - t0)))
 
-    async def _send_cursor(self) -> None:
-        g = self.geo
-        if not g:
-            return
-        try:
-            x, y = self.input.position()
-        except Exception:
-            return
-        pos = (round((x - g["x"]) / g["w"], 4), round((y - g["y"]) / g["h"], 4))
-        if pos != self._last_cursor:
-            self._last_cursor = pos
-            await self.send_json({"t": "cur", "x": pos[0], "y": pos[1]})
+    async def _cursor_loop(self) -> None:
+        """Report the host's real cursor ~30x/s, independent of video flow control."""
+        while True:
+            await asyncio.sleep(1 / 30)
+            g = self.geo
+            if not g:
+                continue
+            try:
+                x, y = self.input.position()
+            except Exception:
+                continue
+            pos = (round((x - g["x"]) / g["w"], 4), round((y - g["y"]) / g["h"], 4))
+            if pos != self._last_cursor:
+                self._last_cursor = pos
+                await self.send_json({"t": "cur", "x": pos[0], "y": pos[1]})
 
     def _on_ack(self, f: int) -> None:
         now = time.monotonic()
@@ -356,6 +399,17 @@ class Session:
                 await self._on_json(json.loads(pt[1:]))
             elif kind == K_FILE:
                 await self._on_upload_chunk(pt[1:])
+            elif kind == K_TERM:
+                tid, data = terminal.unframe(pt[1:])
+                pty = self._terms.get(tid)
+                if pty is not None:
+                    pty.write(data)
+            elif kind == K_TCP:
+                tid, data = terminal.unframe(pt[1:])
+                w = self._tcps.get(tid)
+                if w is not None:
+                    w.write(data)
+                    await w.drain()
 
     async def _on_json(self, m: dict) -> None:
         t = m.get("t")
@@ -375,15 +429,25 @@ class Session:
         elif t == "ping":
             await self.send_json({"t": "pong", "ts": m.get("ts")})
         elif t in ("mm", "md", "mu", "wh", "kd", "ku", "text", "kreset"):
-            if cfg.allow_input and self.geo is not None:
+            if cfg.allow_input and self.geo is not None and self.mode == "desktop":
                 self._on_input(t, m)
+                if t in ("mm", "md", "mu"):
+                    self._set_pointer(m.get("x"), m.get("y"))
+        elif t == "ptr":
+            self._set_pointer(m.get("x"), m.get("y"))
+        elif t in ("term_open", "term_resize", "term_close", "tcp_open", "tcp_close"):
+            if cfg.allow_terminal:
+                await self._on_terminal(t, m)
+            else:
+                err = "term_err" if t.startswith("term") else "tcp_err"
+                await self.send_json({"t": err, "id": m.get("id"), "msg": "Terminal access is disabled on this host."})
         elif t == "clip":
             if cfg.allow_clipboard:
                 s = str(m.get("s", ""))[:1_000_000]
                 self._last_clip = s
                 await asyncio.to_thread(_copy, s)
         elif t == "chat":
-            self.agent.ui.chat(self, str(m.get("s", ""))[:4000])
+            self.agent.relay_chat(self, str(m.get("s", ""))[:4000])
         elif t in ("ls", "get", "fcancel", "put", "pend", "pabort"):
             if cfg.allow_files:
                 await self._on_files(t, m)
@@ -404,6 +468,88 @@ class Session:
             inp.type_text(str(m.get("s", "")))
         elif t == "kreset":
             inp.release_keys()
+
+    # ------------------------------------------------------- participants
+    def _set_pointer(self, x, y) -> None:
+        try:
+            pos = (min(max(float(x), 0.0), 1.0), min(max(float(y), 0.0), 1.0))
+        except (TypeError, ValueError):
+            pos = None  # pointer left the screen
+        if pos != self.pointer:
+            self.pointer = pos
+            self.agent.pointer_moved(self)
+
+    # ----------------------------------------------------------- terminal
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._pumps.add(task)
+        task.add_done_callback(self._pumps.discard)
+
+    @staticmethod
+    def _size(m: dict) -> tuple[int, int]:
+        return max(10, min(500, int(m.get("cols", 80)))), max(5, min(300, int(m.get("rows", 24))))
+
+    async def _on_terminal(self, t: str, m: dict) -> None:
+        tid = int(m.get("id", 0)) & 0xFFFFFFFF
+        if t == "term_open":
+            if len(self._terms) >= terminal.MAX_TERMINALS or tid in self._terms:
+                await self.send_json({"t": "term_err", "id": tid, "msg": "Too many terminals."})
+                return
+            try:
+                pty = terminal.Pty.spawn(*self._size(m))
+            except Exception as e:
+                await self.send_json({"t": "term_err", "id": tid, "msg": f"Could not start a shell: {e}"})
+                return
+            self._terms[tid] = pty
+            self.agent.trace("terminal", self, detail=pty.shell)
+            await self.send_json({"t": "term_opened", "id": tid, "shell": pty.shell})
+            self._spawn(self._pump_pty(tid, pty))
+        elif t == "term_resize":
+            pty = self._terms.get(tid)
+            if pty is not None:
+                pty.resize(*self._size(m))
+        elif t == "term_close":
+            pty = self._terms.pop(tid, None)
+            if pty is not None:
+                pty.close()
+        elif t == "tcp_open":
+            port = int(m.get("port", 0))
+            if not (0 < port < 65536) or len(self._tcps) >= terminal.MAX_TUNNELS or tid in self._tcps:
+                await self.send_json({"t": "tcp_err", "id": tid, "msg": "invalid port or too many tunnels"})
+                return
+            try:
+                reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+            except Exception as e:
+                await self.send_json({"t": "tcp_err", "id": tid, "msg": f"localhost:{port}: {e or type(e).__name__}"})
+                return
+            self._tcps[tid] = writer
+            self.agent.trace("tunnel", self, detail=f"localhost:{port}")
+            await self.send_json({"t": "tcp_opened", "id": tid})
+            self._spawn(self._pump_tcp(tid, reader, writer))
+        elif t == "tcp_close":
+            w = self._tcps.pop(tid, None)
+            if w is not None:
+                w.close()
+
+    async def _pump_pty(self, tid: int, pty) -> None:
+        try:
+            while data := await pty.read():
+                await self._send(K_TERM, terminal.frame(tid, data))
+        finally:
+            if self._terms.pop(tid, None) is not None:
+                pty.close()
+            await self.send_json({"t": "term_closed", "id": tid})
+
+    async def _pump_tcp(self, tid: int, reader, writer) -> None:
+        try:
+            while data := await reader.read(terminal.READ_CHUNK):
+                await self._send(K_TCP, terminal.frame(tid, data))
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            if self._tcps.pop(tid, None) is not None:
+                writer.close()
+            await self.send_json({"t": "tcp_closed", "id": tid})
 
     # -------------------------------------------------------------- files
     async def _on_files(self, t: str, m: dict) -> None:
@@ -433,6 +579,7 @@ class Session:
                 return
             u["tmp"].replace(u["target"])
             self.agent.ui.log(f"Received file {u['target']}")
+            self.agent.trace("upload", self, detail=str(u["target"]))
             await self.send_json({"t": "pdone", "id": fid, "path": str(u["target"])})
 
     async def _download(self, fid: int, path: str) -> None:
@@ -455,6 +602,7 @@ class Session:
                 fh.close()
             await self.send_json({"t": "fend", "id": fid})
             self.agent.ui.log(f"Sent {path}")
+            self.agent.trace("download", self, detail=f"{path} ({size} bytes)")
         except asyncio.CancelledError:
             raise
         except Exception as e:

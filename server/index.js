@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /*
- * AniDesk server: ID registry (rendezvous) + blind relay + static web viewer.
+ * ScreenHarbor server: ID registry (rendezvous) + blind relay + static web viewer.
  *
  * The server never sees session contents. Hosts and viewers run an
  * end-to-end ECDH + password-derived AES-GCM handshake *through* the relay,
@@ -29,9 +29,9 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-  console.log(`AniDesk server
+  console.log(`ScreenHarbor server
 
-  --port <n>          HTTP/WS port (default 8080, env ANIDESK_PORT)
+  --port <n>          HTTP/WS port (default 8080, env SCREENHARBOR_PORT)
   --https-port <n>    Also serve HTTPS/WSS on this port (needed for the web
                       viewer when it is not opened via localhost)
   --tls-cert <file>   PEM certificate for HTTPS (default: auto self-signed)
@@ -43,7 +43,7 @@ if (args.help) {
   process.exit(0);
 }
 
-const PORT = +(args.port || process.env.ANIDESK_PORT || 8080);
+const PORT = +(args.port || process.env.SCREENHARBOR_PORT || 8080);
 const HTTPS_PORT = args['https-port'] ? +args['https-port'] : null;
 const BIND = args.bind || '0.0.0.0';
 const DATA_DIR = path.resolve(args['data-dir'] || path.join(__dirname, 'data'));
@@ -245,7 +245,7 @@ const MIME = {
   '.ico': 'image/x-icon', '.json': 'application/json',
 };
 const SECURITY_HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; style-src 'self'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://ntfy.sh ws: wss:; style-src 'self'; frame-ancestors 'none'",
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
 };
@@ -292,7 +292,7 @@ async function loadTls() {
   const certFile = path.join(dir, 'cert.pem'), keyFile = path.join(dir, 'key.pem');
   if (!fs.existsSync(certFile)) {
     const selfsigned = require('selfsigned');
-    const pems = await Promise.resolve(selfsigned.generate([{ name: 'commonName', value: 'AniDesk' }], {
+    const pems = await Promise.resolve(selfsigned.generate([{ name: 'commonName', value: 'ScreenHarbor' }], {
       keySize: 2048, days: 825, algorithm: 'sha256',
     }));
     fs.mkdirSync(dir, { recursive: true });
@@ -306,12 +306,12 @@ async function loadTls() {
 async function main() {
   const server = http.createServer(onRequest);
   attachWs(server);
-  server.listen(PORT, BIND, () => log(`AniDesk server on http://${BIND}:${PORT}  (ws path /ws)`));
+  server.listen(PORT, BIND, () => log(`ScreenHarbor server on http://${BIND}:${PORT}  (ws path /ws)`));
   if (HTTPS_PORT) {
     const tls = await loadTls();
     const s = https.createServer(tls, onRequest);
     attachWs(s);
-    s.listen(HTTPS_PORT, BIND, () => log(`AniDesk server on https://${BIND}:${HTTPS_PORT}`));
+    s.listen(HTTPS_PORT, BIND, () => log(`ScreenHarbor server on https://${BIND}:${HTTPS_PORT}`));
   }
 }
 

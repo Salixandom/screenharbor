@@ -1,8 +1,8 @@
-# How AnyDesk works, and how AniDesk does it
+# How AnyDesk works, and how ScreenHarbor does it
 
 This document has two halves: what we learned about AnyDesk (and RustDesk, the
-best-known open-source alternative), and the design AniDesk uses as a result.
-AniDesk is a clean-room implementation: it uses no AnyDesk code or protocol
+best-known open-source alternative), and the design ScreenHarbor uses as a result.
+ScreenHarbor is a clean-room implementation: it uses no AnyDesk code or protocol
 details, only publicly observable behaviour.
 
 ## Part 1 — What AnyDesk does
@@ -75,11 +75,11 @@ details, only publicly observable behaviour.
 * Ed25519 server key pinned in clients; sessions are end-to-end encrypted.
 * Codecs: VP8/VP9/AV1/H.264/H.265 with hardware encoders when available.
 
-## Part 2 — AniDesk design
+## Part 2 — ScreenHarbor design
 
 ```
  ┌──────────────┐  control WS (register, "incoming")  ┌───────────────────────┐
- │  Host agent  │ ───────────────────────────────────►│      AniDesk server   │
+ │  Host agent  │ ───────────────────────────────────►│      ScreenHarbor server   │
  │  (Python)    │  session WS per viewer              │  ID registry + relay  │
  │ capture/input│ ◄═══════ opaque E2E frames ═══════► │  + web viewer files   │
  └──────────────┘                                     └──────────▲────────────┘
@@ -89,7 +89,7 @@ details, only publicly observable behaviour.
                                                       └───────────────────────┘
 ```
 
-| AnyDesk concept | AniDesk equivalent |
+| AnyDesk concept | ScreenHarbor equivalent |
 |---|---|
 | Main relay connection + numeric ID | Host keeps a control WebSocket to `/ws`; server assigns a 9-digit ID, persisted with a secret that proves ownership |
 | Relay servers on 443 | One Node.js server; put it behind 443 (reverse proxy) to get through firewalls |
@@ -110,7 +110,7 @@ details, only publicly observable behaviour.
 3. Host → viewer `hello {pub, salts[]}` (one salt per accepted password:
    session and, optionally, unattended).
    Viewer → host `hello {pub}` followed by one encrypted `auth` frame per salt.
-4. Keys: `HKDF-SHA256(ECDH, salt=PBKDF2(password, salt, 150k), info="anidesk/v1"|hostPub|viewerPub)`
+4. Keys: `HKDF-SHA256(ECDH, salt=PBKDF2(password, salt, 150k), info="screenharbor/v1"|hostPub|viewerPub)`
    → separate keys for each direction. Frames are `seq(u64) | AES-GCM`, and
    strictly increasing sequence numbers block replay and reordering.
 5. If the password is wrong, decryption fails, the host logs it, and after
@@ -181,7 +181,7 @@ viewer browser ──HTTPS/WSS──► <words>.trycloudflare.com ══ Cloudfl
   Accept prompt.
 * `cloudflared` is tied to the host's lifetime: a Windows Job Object (`KILL_ON_JOB_CLOSE`) or Linux
   `PR_SET_PDEATHSIG`, so even a crashed or killed host never leaves a tunnel running. Verified on both.
-* The share code is just the tunnel hostname: any AniDesk viewer accepts it in the ID field and connects
+* The share code is just the tunnel hostname: any ScreenHarbor viewer accepts it in the ID field and connects
   to `wss://<code>.trycloudflare.com/ws` directly.
 
 Trade-offs: Cloudflare terminates TLS and serves the viewer page. Session contents stay end-to-end

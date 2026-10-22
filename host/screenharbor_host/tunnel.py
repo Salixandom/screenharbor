@@ -2,7 +2,7 @@
 
 Uses `cloudflared tunnel --url ...` (free, no Cloudflare account). If cloudflared
 isn't installed, the official release binary is downloaded once into
-~/.anidesk/bin and checked against the SHA-256 published in the release notes.
+~/.screenharbor/bin and checked against the SHA-256 published in the release notes.
 The link (https://<random-words>.trycloudflare.com) dies when sharing stops.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 
-log = logging.getLogger("anidesk")
+log = logging.getLogger("screenharbor")
 
 RELEASE_API = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
 URL_RE = re.compile(r"https://([a-z0-9-]+)\.trycloudflare\.com")
@@ -54,7 +54,7 @@ def download_cloudflared(progress=lambda msg: None) -> str:
     asset = _asset_name()
     progress("Downloading cloudflared (one-time)...")
     req = urllib.request.Request(RELEASE_API, headers={"Accept": "application/vnd.github+json",
-                                                       "User-Agent": "anidesk"})
+                                                       "User-Agent": "screenharbor"})
     with urllib.request.urlopen(req, timeout=30) as r:
         release = json.load(r)
     m = re.search(rf"^{re.escape(asset)}:\s*([0-9a-f]{{64}})\s*$", release.get("body", ""), re.M)
@@ -68,7 +68,7 @@ def download_cloudflared(progress=lambda msg: None) -> str:
     os.close(fd)
     try:
         h = hashlib.sha256()
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "anidesk"}), timeout=120) as r, \
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "screenharbor"}), timeout=120) as r, \
                 open(tmp, "wb") as f:
             while chunk := r.read(1 << 20):
                 h.update(chunk)
@@ -150,6 +150,9 @@ class QuickTunnel:
         return m.group(1) if m else None
 
     async def start(self, progress=lambda msg: None, timeout: float = 45) -> str:
+        # A restarted quick tunnel gets a different hostname. Never let the
+        # previous process's URL satisfy the new process's readiness check.
+        self.url = None
         exe = find_cloudflared() or await asyncio.to_thread(download_cloudflared, progress)
         progress("Opening a Cloudflare tunnel...")
         flags: dict = {}
@@ -204,3 +207,58 @@ class QuickTunnel:
                 self._proc.kill()
         self._proc = None
         self.url = None
+
+
+class NamedTunnel(QuickTunnel):
+    """Run a Cloudflare-managed tunnel using its protected token file."""
+
+    def __init__(self, local_http: str, hostname: str, token_file: str) -> None:
+        super().__init__(local_http)
+        if not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", hostname, re.I):
+            raise ValueError("enter a valid custom hostname, such as remote.example.com")
+        token_path = os.path.abspath(os.path.expanduser(token_file))
+        if not os.path.isfile(token_path):
+            raise ValueError(f"Cloudflare tunnel token file not found: {token_path}")
+        self.hostname = hostname.lower()
+        self.token_file = token_path
+
+    @property
+    def code(self) -> str | None:
+        return self.hostname
+
+    async def start(self, progress=lambda msg: None, timeout: float = 60) -> str:
+        exe = find_cloudflared() or await asyncio.to_thread(download_cloudflared, progress)
+        progress(f"Connecting named Cloudflare tunnel for {self.hostname}...")
+        flags: dict = {}
+        if sys.platform == "win32":
+            flags["creationflags"] = 0x08000000
+        elif sys.platform.startswith("linux"):
+            flags["preexec_fn"] = _linux_pdeathsig
+        self._proc = await asyncio.create_subprocess_exec(
+            exe, "tunnel", "--no-autoupdate", "run", "--token-file", self.token_file,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE, **flags)
+        if sys.platform == "win32":
+            try:
+                _tie_to_parent_windows(self._proc.pid)
+            except Exception:
+                log.debug("job object setup failed", exc_info=True)
+
+        async def wait_ready() -> None:
+            while True:
+                line = await self._proc.stderr.readline()
+                if not line:
+                    raise RuntimeError("cloudflared exited before the named tunnel connected")
+                text = line.decode(errors="replace")
+                log.debug("cloudflared: %s", text.rstrip())
+                if "Registered tunnel connection" in text:
+                    return
+
+        try:
+            await asyncio.wait_for(wait_ready(), timeout)
+        except BaseException:
+            await self.stop()
+            raise
+        self.url = f"https://{self.hostname}"
+        self._drain = asyncio.create_task(self._drain_stderr())
+        return self.url
