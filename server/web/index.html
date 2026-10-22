@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AniDesk</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+</head>
+<body>
+  <!-- Connect screen -->
+  <main id="home" class="home">
+    <div class="card">
+      <div class="brand"><img src="favicon.svg" alt=""> AniDesk</div>
+      <p class="muted">Open-source remote desktop. Enter the ID, or the share code / link, shown on the computer you want to reach.</p>
+      <form id="connect-form" autocomplete="off">
+        <label>Remote ID or share code <input id="remote-id" placeholder="123 456 789  or  gentle-river-moon-fox" autocapitalize="off" spellcheck="false" required></label>
+        <label>Password <input id="remote-pw" type="password" required></label>
+        <label>Your name <input id="viewer-name" maxlength="40" placeholder="shown to the remote user"></label>
+        <button type="submit" class="primary" id="connect-btn">Connect</button>
+      </form>
+      <p id="home-status" class="status"></p>
+      <ul id="recent" class="recent"></ul>
+    </div>
+  </main>
+
+  <!-- Session screen -->
+  <section id="session" class="session hidden">
+    <header class="toolbar">
+      <span class="peer" id="peer-name"></span>
+      <select id="sel-monitor" title="Screen"></select>
+      <select id="sel-codec" title="Codec">
+        <option value="auto" selected>Auto codec</option>
+        <option value="h264">H.264</option>
+        <option value="jpeg">JPEG tiles</option>
+      </select>
+      <select id="sel-quality" title="Quality">
+        <option value="35">Fast</option>
+        <option value="60" selected>Balanced</option>
+        <option value="80">Quality</option>
+        <option value="92">Best</option>
+      </select>
+      <select id="sel-scale" title="Resolution">
+        <option value="1" selected>Full res</option>
+        <option value="2">Half res</option>
+      </select>
+      <select id="sel-fps" title="Frame rate">
+        <option value="15">15 fps</option>
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+      <select id="sel-keys" title="Send keys">
+        <option value="">Send keys…</option>
+        <option value="MetaLeft">Windows / Cmd</option>
+        <option value="AltLeft+Tab">Alt+Tab</option>
+        <option value="ControlLeft+ShiftLeft+Escape">Ctrl+Shift+Esc</option>
+        <option value="ControlLeft+AltLeft+Delete">Ctrl+Alt+Del</option>
+        <option value="MetaLeft+KeyD">Win+D (desktop)</option>
+        <option value="MetaLeft+KeyL">Win+L (lock)</option>
+        <option value="PrintScreen">Print Screen</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="chk-viewonly"> View only</label>
+      <span class="spacer"></span>
+      <span class="stats" id="stats"></span>
+      <button id="btn-kbd" title="On-screen keyboard (touch devices)">⌨</button>
+      <button id="btn-shot" title="Save screenshot">📷</button>
+      <button id="btn-rec" title="Record session to a video file">⏺ Rec</button>
+      <button id="btn-files">Files</button>
+      <button id="btn-clip">Clipboard</button>
+      <button id="btn-chat">Chat <span id="chat-badge" class="badge hidden">•</span></button>
+      <button id="btn-full">Fullscreen</button>
+      <button id="btn-disconnect" class="danger">Disconnect</button>
+    </header>
+    <div class="stage" id="stage">
+      <canvas id="screen" tabindex="0"></canvas>
+      <div id="rcursor" class="rcursor hidden"></div>
+      <div id="overlay" class="overlay hidden"></div>
+      <textarea id="kbd" class="kbd" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Remote keyboard"></textarea>
+    </div>
+
+    <aside id="panel-files" class="panel hidden">
+      <h3>Remote files <button class="x" data-close="panel-files">×</button></h3>
+      <div class="pathbar">
+        <button id="fs-up" title="Up">↑</button>
+        <button id="fs-home" title="Home">⌂</button>
+        <input id="fs-path" spellcheck="false">
+      </div>
+      <ul id="fs-list" class="fs-list"></ul>
+      <div class="dropzone" id="dropzone">Drop files here to upload to this folder, or
+        <label class="link">choose files<input type="file" id="fs-upload" multiple hidden></label></div>
+      <ul id="transfers" class="transfers"></ul>
+    </aside>
+
+    <aside id="panel-clip" class="panel hidden">
+      <h3>Clipboard <button class="x" data-close="panel-clip">×</button></h3>
+      <label class="chk"><input type="checkbox" id="chk-autoclip" checked> Auto-copy remote clipboard</label>
+      <p class="muted">Remote clipboard</p>
+      <textarea id="clip-remote" readonly></textarea>
+      <button id="clip-copy-local">Copy to my clipboard</button>
+      <p class="muted">Send text</p>
+      <textarea id="clip-local" placeholder="Paste text here"></textarea>
+      <div class="row">
+        <button id="clip-send">Set remote clipboard</button>
+        <button id="clip-type">Type it</button>
+      </div>
+    </aside>
+
+    <aside id="panel-chat" class="panel hidden">
+      <h3>Chat <button class="x" data-close="panel-chat">×</button></h3>
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form" class="row"><input id="chat-input" placeholder="Message"><button>Send</button></form>
+    </aside>
+
+    <div id="toast" class="toast hidden"></div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>

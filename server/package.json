@@ -1,0 +1,14 @@
+{
+  "name": "anidesk-server",
+  "version": "0.1.0",
+  "description": "AniDesk rendezvous + relay server and web viewer",
+  "main": "index.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "selfsigned": "^2.4.1",
+    "ws": "^8.18.0"
+  }
+}

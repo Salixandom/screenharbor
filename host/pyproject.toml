@@ -1,0 +1,35 @@
+[project]
+name = "anidesk-host"
+version = "0.2.0"
+description = "AniDesk host agent: share this computer's screen, keyboard, mouse, files and clipboard"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42",
+    "mss>=9",
+    "numpy>=1.26",
+    "pillow>=10",
+    "pynput>=1.7",
+    "pyperclip>=1.8",
+    "websockets>=13",
+    # Fast paths (optional at runtime, the host falls back without them):
+    "av>=12",                                  # H.264 encoding (hardware when available)
+    "simplejpeg>=1.7",                         # libjpeg-turbo straight from BGRA
+    "dxcam>=0.0.5; sys_platform == 'win32'",   # DXGI desktop duplication capture
+]
+
+[project.scripts]
+anidesk-host = "anidesk_host.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["anidesk_host"]
+
+[tool.pytest.ini_options]
+testpaths = ["../tests"]
