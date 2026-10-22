@@ -12,10 +12,14 @@ from .agent import Agent
 from .config import Config, generate_password
 
 ACCENT = "#e8473f"
+UI_BG = "#15181e"
+UI_PANEL = "#20242c"
+UI_TEXT = "#e9ebf0"
+UI_MUTED = "#a3aab6"
 
 
 def fmt_id(i: str) -> str:
-    return " ".join(i[k:k + 3] for k in range(0, len(i), 3)) if i else "—"
+    return " ".join(i[k:k + 3] for k in range(0, len(i), 3)) if i else "Not connected"
 
 
 def _make_overlay(win) -> None:
@@ -70,7 +74,9 @@ class HostWindow:
         self.loop = asyncio.new_event_loop()
         self.root = tk.Tk()
         self.root.title("ScreenHarbor")
-        self.root.minsize(480, 680)
+        self.root.configure(background=UI_BG)
+        self.root.geometry("560x820")
+        self.root.minsize(500, 680)
         self._build()
         threading.Thread(target=self._run_loop, daemon=True).start()
         self.root.after(100, self._poll)
@@ -82,20 +88,51 @@ class HostWindow:
     def _build(self) -> None:
         r = self.root
         style = ttk.Style(r)
-        style.configure("Big.TLabel", font=("Segoe UI", 20, "bold"))
-        style.configure("Head.TLabel", font=("Segoe UI", 10, "bold"), foreground=ACCENT)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(".", font=("Segoe UI", 10), background=UI_BG, foreground=UI_TEXT)
+        style.configure("TFrame", background=UI_BG)
+        style.configure("Card.TFrame", background=UI_PANEL)
+        style.configure("TLabel", background=UI_BG, foreground=UI_TEXT)
+        style.configure("Card.TLabel", background=UI_PANEL, foreground=UI_TEXT)
+        style.configure("Muted.TLabel", background=UI_BG, foreground=UI_MUTED)
+        style.configure("EmptyId.TLabel", font=("Segoe UI", 11), background=UI_BG, foreground=UI_MUTED)
+        style.configure("Big.TLabel", font=("Segoe UI", 24, "bold"), background=UI_BG, foreground=UI_TEXT)
+        style.configure("Head.TLabel", font=("Segoe UI", 10, "bold"), background=UI_BG, foreground=ACCENT)
+        style.configure("TLabelframe", background=UI_BG, foreground=UI_TEXT, bordercolor="#343a45",
+                        lightcolor="#343a45", darkcolor="#343a45", relief="flat")
+        style.configure("TLabelframe.Label", background=UI_BG, foreground=UI_MUTED,
+                        font=("Segoe UI", 9, "bold"))
+        style.configure("TButton", background="#303641", foreground=UI_TEXT, borderwidth=0,
+                        padding=(10, 6), focusthickness=0)
+        style.map("TButton", background=[("active", "#3b4350"), ("disabled", "#272b33")],
+                  foreground=[("disabled", "#707784")])
+        style.configure("Accent.TButton", background=ACCENT, foreground="white", font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton", background=[("active", "#fa5a50")])
+        style.configure("TEntry", fieldbackground="#252a33", foreground=UI_TEXT, insertcolor=UI_TEXT,
+                        bordercolor="#39414e", padding=6)
+        style.configure("TCheckbutton", background=UI_BG, foreground=UI_TEXT, padding=(2, 3))
+        style.map("TCheckbutton", background=[("active", UI_BG)], foreground=[("disabled", "#707784")])
+        style.configure("Treeview", background=UI_PANEL, fieldbackground=UI_PANEL, foreground=UI_TEXT,
+                        rowheight=28, borderwidth=0)
+        style.configure("Treeview.Heading", background="#292e38", foreground=UI_TEXT, padding=7)
+        style.map("Treeview", background=[("selected", "#49312f")], foreground=[("selected", "white")])
 
-        top = ttk.Frame(r, padding=12)
+        top = ttk.Frame(r, padding=(20, 18, 20, 14))
         top.pack(fill="x")
         ttk.Label(top, text="This desk", style="Head.TLabel").grid(row=0, column=0, sticky="w")
         self.id_var = tk.StringVar(value=fmt_id(self.cfg.id))
-        ttk.Label(top, textvariable=self.id_var, style="Big.TLabel").grid(row=1, column=0, sticky="w")
-        ttk.Button(top, text="Copy", command=lambda: self._clip(self.cfg.id)).grid(row=1, column=1, padx=4)
+        self.id_label = ttk.Label(top, textvariable=self.id_var,
+                                  style="Big.TLabel" if self.cfg.id else "EmptyId.TLabel")
+        self.id_label.grid(row=1, column=0, sticky="w")
+        ttk.Button(top, text="Copy ID", command=lambda: self._clip(self.cfg.id)).grid(row=1, column=1, padx=8)
 
         ttk.Label(top, text="Session password").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.pw_var = tk.StringVar(value=self.agent.session_password)
         ttk.Label(top, textvariable=self.pw_var, font=("Consolas", 14)).grid(row=3, column=0, sticky="w")
-        ttk.Button(top, text="Copy", command=lambda: self._clip(self.pw_var.get())).grid(row=3, column=1, padx=4)
+        ttk.Button(top, text="Copy", command=lambda: self._clip(self.pw_var.get())).grid(row=3, column=1, padx=8)
         ttk.Button(top, text="New", command=self._new_password).grid(row=3, column=2)
         self.perm_btn = ttk.Button(top, command=self._set_permanent)
         self.perm_btn.grid(row=4, column=0, sticky="w", pady=(6, 0))
@@ -110,7 +147,7 @@ class HostWindow:
 
         share = ttk.LabelFrame(r, text="No server? Share via internet link", padding=8)
         share.pack(fill="x", padx=12, pady=(8, 0))
-        self.share_btn = ttk.Button(share, text="Share via internet link", command=self._toggle_share)
+        self.share_btn = ttk.Button(share, text="Share via internet link", style="Accent.TButton", command=self._toggle_share)
         self.share_btn.grid(row=0, column=0, sticky="w")
         self.stable_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(share, text="Keep a stable address", variable=self.stable_var).grid(row=0, column=1, sticky="w", padx=8)
@@ -130,7 +167,8 @@ class HostWindow:
         self.copy_address_btn = ttk.Button(share, text="Copy address", command=lambda: self._clip(self.address_var.get()))
 
         self.status_var = tk.StringVar(value="Starting...")
-        ttk.Label(r, textvariable=self.status_var, padding=(12, 4), foreground="#666").pack(fill="x")
+        ttk.Label(r, textvariable=self.status_var, style="Muted.TLabel", padding=(12, 5),
+                  wraplength=520, justify="left").pack(fill="x")
 
         opts = ttk.LabelFrame(r, text="Permissions", padding=8)
         opts.pack(fill="x", padx=12, pady=4)
@@ -146,7 +184,10 @@ class HostWindow:
 
         sess = ttk.LabelFrame(r, text="Connected now", padding=8)
         sess.pack(fill="x", padx=12, pady=4)
-        self.sess_list = tk.Listbox(sess, height=4)
+        self.sess_list = tk.Listbox(sess, height=4, bg="#171a20", fg=UI_TEXT,
+                                    selectbackground="#49312f", selectforeground="white",
+                                    relief="flat", highlightthickness=1, highlightbackground="#343a45",
+                                    highlightcolor=ACCENT, activestyle="none", font=("Segoe UI", 9))
         self.sess_list.pack(side="left", fill="x", expand=True)
         side = ttk.Frame(sess)
         side.pack(side="left", padx=6)
@@ -159,7 +200,10 @@ class HostWindow:
 
         chat = ttk.LabelFrame(r, text="Chat & log", padding=8)
         chat.pack(fill="both", expand=True, padx=12, pady=(4, 12))
-        self.log_box = tk.Text(chat, height=8, state="disabled", wrap="word")
+        self.log_box = tk.Text(chat, height=8, state="disabled", wrap="word", bg="#171a20", fg=UI_TEXT,
+                               insertbackground=UI_TEXT, selectbackground="#49312f", relief="flat",
+                               padx=10, pady=8, font=("Segoe UI", 9), highlightthickness=1,
+                               highlightbackground="#343a45", highlightcolor=ACCENT)
         self.log_box.pack(fill="both", expand=True)
         row = ttk.Frame(chat)
         row.pack(fill="x", pady=(6, 0))
@@ -247,6 +291,7 @@ class HostWindow:
             self.cfg.id = self.cfg.secret = ""  # IDs are per server
             self.cfg.save()
             self.id_var.set(fmt_id(""))
+            self.id_label.configure(style="EmptyId.TLabel")
         self.loop.call_soon_threadsafe(self.agent.reconnect)
 
     def _save_opts(self) -> None:
@@ -372,6 +417,7 @@ class HostWindow:
                     self.status_var.set(ev[1])
                 elif kind == "id":
                     self.id_var.set(fmt_id(ev[1]))
+                    self.id_label.configure(style="Big.TLabel" if ev[1] else "EmptyId.TLabel")
                 elif kind == "log":
                     self._log(ev[1])
                 elif kind == "chat":
